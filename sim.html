@@ -1,0 +1,551 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Advanced Heat-Seeking Simulator — SkyShield</title>
+<style>
+  :root{--bg:#061018;--panel:#0e2a33;--accent:#2ee6a5;--muted:#9fbfcf}
+  body{margin:0;background:var(--bg);font-family:Inter, system-ui, Arial;color:#e6f7f2}
+  .wrap{display:flex;height:100vh;gap:12px;padding:12px;box-sizing:border-box}
+  .sim {
+    flex:1; border-radius:10px; overflow:hidden; position:relative;
+    background: radial-gradient(circle at 20% 10%, #051a22 0%, #021015 40%);
+    box-shadow: 0 8px 28px rgba(0,0,0,0.6);
+  }
+  canvas{display:block;width:100%;height:100%}
+  .ui {
+    width:360px; background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+    border-radius:10px;padding:12px;border:1px solid rgba(255,255,255,0.03);
+    box-shadow: 0 8px 28px rgba(0,0,0,0.6);
+  }
+  h2{margin:4px 0 8px 0;color:var(--accent);font-size:18px}
+  label{display:block;color:var(--muted);font-size:13px;margin-top:8px}
+  input[type=range]{width:100%}
+  .row{display:flex;gap:8px;align-items:center;margin-top:8px}
+  button{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px;border-radius:8px;color:var(--accent);cursor:pointer}
+  .controls-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  small{color:#7fa0ab}
+  .status {position:absolute; left:12px; bottom:12px; background:rgba(0,0,0,0.45); padding:8px 10px;border-radius:8px; color:#dff6ea; font-size:13px}
+  .legend{font-size:12px;color:var(--muted);margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="sim">
+    <canvas id="cv" width="1200" height="720"></canvas>
+    <div class="status" id="status">Missiles: 0 • Targets: 0 • Flares: 0</div>
+  </div>
+
+  <div class="ui">
+    <h2>Heat-Seeking Simulator — Advanced</h2>
+    <small>Click canvas to spawn <b>flare</b> at cursor. Use controls to tune seeker & flares.</small>
+
+    <label>Missile speed <span id="speedV">260</span></label>
+    <input id="speed" type="range" min="60" max="800" value="260">
+
+    <label>Missile turn rate (deg/s) <span id="turnV">120</span></label>
+    <input id="turn" type="range" min="30" max="900" value="120">
+
+    <label>Seeker noise (0-1) <span id="noiseV">0.08</span></label>
+    <input id="noise" type="range" min="0" max="0.5" step="0.01" value="0.08">
+
+    <div class="row">
+      <div style="flex:1">
+        <label>Flare lifetime (s) <span id="flareLifeV">6</span></label>
+        <input id="flareLife" type="range" min="1" max="15" value="6">
+      </div>
+    </div>
+
+    <label>Flare intensity multiplier <span id="flareIntensityV">2.5</span></label>
+    <input id="flareIntensity" type="range" min="0.5" max="6" step="0.1" value="2.5">
+
+    <label>Flare barrage count <span id="barrageV">6</span></label>
+    <input id="barrageCount" type="range" min="1" max="30" step="1" value="6">
+
+    <div class="controls-grid">
+      <button id="spawnTarget">Spawn Target</button>
+      <button id="spawnMissile">Spawn Missile</button>
+      <button id="spawnMultiMissile">Spawn x3 Missiles</button>
+      <button id="flareBarrage">Flare Barrage</button>
+      <button id="toggleAutoFlare">Auto-Flare: OFF</button>
+      <button id="resetBtn">Reset All</button>
+    </div>
+
+    <label style="margin-top:10px">Auto-flare interval (s) <span id="autoFlareV">2.5</span></label>
+    <input id="autoFlareInterval" type="range" min="0.5" max="6" step="0.1" value="2.5">
+
+    <div class="legend">
+      <div><span style="color:#ffd166">●</span> Target (warm) &nbsp; <span style="color:#ffb38a">●</span> Flare &nbsp; <span style="color:#ff6b6b">●</span> Missile</div>
+      <div style="margin-top:6px">Lock indicator = yellow ring + line from missile → locked source</div>
+    </div>
+
+    <div style="margin-top:12px;color:#9fbfcf;font-size:13px">
+      <div><b>Tips:</b></div>
+      <ul style="margin:6px 0 0 16px;padding:0">
+        <li>Click canvas to drop a flare exactly at that spot.</li>
+        <li>Use Flare Barrage to drop many flares at one position.</li>
+        <li>Toggle Auto-Flare to auto-deploy flares near the target.</li>
+        <li>Adjust turn rate & speed to show seeker behavior.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+/* Advanced Heat-Seeking Simulator
+ - Multiple targets & missiles
+ - Click to spawn flare at exact cursor
+ - Flare barrage, auto-flare options
+ - Visual lock-on indicator (ring + line)
+ - Seeker logic: perceived IR strength (intensity/d^2) + noise
+ - Limited turn-rate, lock persistence/reacquire
+*/
+
+const canvas = document.getElementById('cv');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const statusEl = document.getElementById('status');
+
+// UI refs
+const ui = {
+  speed: document.getElementById('speed'),
+  turn: document.getElementById('turn'),
+  noise: document.getElementById('noise'),
+  flareLife: document.getElementById('flareLife'),
+  flareIntensity: document.getElementById('flareIntensity'),
+  barrageCount: document.getElementById('barrageCount'),
+  spawnTarget: document.getElementById('spawnTarget'),
+  spawnMissile: document.getElementById('spawnMissile'),
+  spawnMultiMissile: document.getElementById('spawnMultiMissile'),
+  flareBarrage: document.getElementById('flareBarrage'),
+  toggleAutoFlare: document.getElementById('toggleAutoFlare'),
+  resetBtn: document.getElementById('resetBtn'),
+  autoFlareInterval: document.getElementById('autoFlareInterval'),
+  speedV: document.getElementById('speedV'),
+  turnV: document.getElementById('turnV'),
+  noiseV: document.getElementById('noiseV'),
+  flareLifeV: document.getElementById('flareLifeV'),
+  flareIntensityV: document.getElementById('flareIntensityV'),
+  barrageV: document.getElementById('barrageV'),
+  autoFlareV: document.getElementById('autoFlareV')
+};
+
+function updateUIvals(){
+  ui.speedV.textContent = ui.speed.value;
+  ui.turnV.textContent = ui.turn.value;
+  ui.noiseV.textContent = parseFloat(ui.noise.value).toFixed(2);
+  ui.flareLifeV.textContent = ui.flareLife.value;
+  ui.flareIntensityV.textContent = ui.flareIntensity.value;
+  ui.barrageV.textContent = ui.barrageCount.value;
+  ui.autoFlareV.textContent = ui.autoFlareInterval.value;
+}
+updateUIvals();
+Object.values(ui).forEach(el => { if(el && el.tagName === 'INPUT') el.addEventListener('input', updateUIvals); });
+
+// Entities
+let targets = [];   // {id,x,y,vx,vy,heat,pattern}
+let missiles = [];  // {id,x,y,angle,speed,turnRate,lockedSourceId,lockedType,lockTimer}
+let flares = [];    // {id,x,y,vx,vy,intensity,life,spawnT}
+let explosions = []; // {x,y,life,ttl}
+
+let autoFlare = false;
+let lastAutoFlare = 0;
+
+const uid = (prefix='E') => prefix + Date.now().toString(36) + Math.floor(Math.random()*999).toString(36);
+
+// spawn functions
+function spawnTarget(){
+  const side = Math.floor(Math.random()*4);
+  let x,y;
+  if(side===0){ x = Math.random()*(W-120)+60; y = -40; }
+  else if(side===1){ x = W+40; y = Math.random()*(H-120)+60; }
+  else if(side===2){ x = Math.random()*(W-120)+60; y = H+40; }
+  else { x = -40; y = Math.random()*(H-120)+60; }
+  const angle = Math.atan2(H/2 - y, W/2 - x) + (Math.random()-0.5)*0.6;
+  const speed = Math.random()*80 + 50;
+  targets.push({ id: uid('T'), x, y, vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed, heat: 1.0 + Math.random()*0.8, pattern: Math.random()<0.5 ? 'jag' : 'straight' });
+}
+
+function spawnMissile(x=null,y=null){
+  // spawn near bottom-left if no coords, otherwise at coords
+  let sx = x, sy = y;
+  if(sx===null){ sx = 80 + Math.random()*60; sy = H - (60 + Math.random()*40); }
+  missiles.push({
+    id: uid('M'), x: sx, y: sy,
+    angle: Math.random()*Math.PI*2,
+    speed: parseFloat(ui.speed.value),
+    turnRate: parseFloat(ui.turn.value) * Math.PI/180,
+    lockedSourceId: null, lockedType: null, lockTimer:0, status:'active'
+  });
+}
+
+function spawnMultiMissiles(n=3){
+  for(let i=0;i<n;i++){ spawnMissile(); }
+}
+
+function spawnFlareAt(px,py, count=1){
+  const now = performance.now()/1000;
+  for(let i=0;i<count;i++){
+    const id = uid('F');
+    const angle = Math.random()*Math.PI*2;
+    const drift = 10 + Math.random()*28;
+    const vx = Math.cos(angle) * drift;
+    const vy = Math.sin(angle) * drift;
+    const intensity = parseFloat(ui.flareIntensity.value) * (0.85 + Math.random()*0.3);
+    const life = parseFloat(ui.flareLife.value);
+    flares.push({ id, x: px + (Math.random()-0.5)*8, y: py + (Math.random()-0.5)*8, vx, vy, intensity, life, spawnT: now });
+  }
+}
+
+function flareBarrageAt(px,py){
+  const count = parseInt(ui.barrageCount.value);
+  spawnFlareAt(px,py,count);
+}
+
+function resetAll(){
+  targets = []; missiles = []; flares = []; explosions = [];
+  lastAutoFlare = performance.now()/1000;
+  updateStatus();
+}
+
+// click to spawn flare exactly at click position
+canvas.addEventListener('click', (ev) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (ev.clientX - rect.left) * (canvas.width/rect.width);
+  const my = (ev.clientY - rect.top) * (canvas.height/rect.height);
+  spawnFlareAt(mx,my,1);
+  updateStatus();
+});
+
+// UI button events
+ui.spawnTarget.addEventListener('click', ()=> { spawnTarget(); updateStatus(); });
+ui.spawnMissile.addEventListener('click', ()=> { spawnMissile(); updateStatus(); });
+ui.spawnMultiMissile.addEventListener('click', ()=> { spawnMultiMissiles(3); updateStatus(); });
+ui.flareBarrage.addEventListener('click', ()=> {
+  // if there is a target, barrage at target, else center
+  if(targets.length) flareBarrageAt(targets[0].x, targets[0].y);
+  else flareBarrageAt(W/2,H/2);
+  updateStatus();
+});
+ui.toggleAutoFlare.addEventListener('click', ()=> {
+  autoFlare = !autoFlare;
+  ui.toggleAutoFlare.textContent = 'Auto-Flare: ' + (autoFlare ? 'ON' : 'OFF');
+});
+ui.resetBtn.addEventListener('click', ()=> { resetAll(); updateStatus(); });
+
+// helper IR strength model (perceived by missile at (sx,sy))
+function irStrength(entity, sx, sy){
+  // entity can be target (heat) or flare (intensity)
+  const dx = entity.x - sx, dy = entity.y - sy;
+  const d2 = Math.max(20, dx*dx + dy*dy);
+  const base = entity.heat ? entity.heat : entity.intensity;
+  // perceived strength ~ base / d^2 (simple), clamp top
+  return base / d2;
+}
+
+// guide missile: pick best perceived source with noise, limit turn-rate, lock timer logic
+function updateMissile(m, dt){
+  // update speed and turnRate from UI
+  m.speed = parseFloat(ui.speed.value);
+  m.turnRate = parseFloat(ui.turn.value) * Math.PI/180;
+
+  // build sources list
+  const sources = [];
+  for(const t of targets) sources.push({ type:'target', id: t.id, obj: t });
+  for(const f of flares) sources.push({ type:'flare', id: f.id, obj: f });
+
+  if(sources.length === 0){
+    // no source: fly straight
+    m.x += Math.cos(m.angle) * m.speed * dt;
+    m.y += Math.sin(m.angle) * m.speed * dt;
+    m.lockedSourceId = null; m.lockedType = null; m.lockTimer = 0;
+    return;
+  }
+
+  // evaluate perceived strength with noise
+  let best = null, bestVal = -Infinity;
+  for(const s of sources){
+    const val = irStrength(s.obj, m.x, m.y);
+    const noise = (Math.random()-0.5) * parseFloat(ui.noise.value) * val; // relative noise
+    const total = val + noise;
+    if(total > bestVal){ bestVal = total; best = s; }
+  }
+
+  if(!best) return;
+
+  // if currently locked and lock is still within small window, let it persist unless another is significantly stronger
+  const strongThreshold = 1.15; // require 15% stronger to switch
+  const currentlyLocked = (m.lockedSourceId === best.id && m.lockedType === best.type);
+  let chosen = best;
+  if(m.lockedSourceId && m.lockedType){
+    // find current source object if exists
+    const cur = sources.find(s => s.id === m.lockedSourceId && s.type === m.lockedType);
+    if(cur){
+      const curVal = irStrength(cur.obj, m.x, m.y);
+      if(curVal * strongThreshold >= (irStrength(best.obj, m.x, m.y))){
+        chosen = cur; // keep current lock if it's not significantly weaker
+      } else {
+        chosen = best; // switch
+      }
+    } else {
+      chosen = best; // current lock lost (object disappeared)
+    }
+  }
+
+  // desired heading
+  const targetObj = chosen.obj;
+  const desiredAng = Math.atan2(targetObj.y - m.y, targetObj.x - m.x);
+  // normalize diff
+  let diff = desiredAng - m.angle;
+  while(diff > Math.PI) diff -= Math.PI*2;
+  while(diff < -Math.PI) diff += Math.PI*2;
+
+  // apply limited turn
+  const maxTurn = m.turnRate * dt;
+  const turn = Math.max(-maxTurn, Math.min(maxTurn, diff));
+  m.angle += turn;
+
+  // move missile
+  m.x += Math.cos(m.angle) * m.speed * dt;
+  m.y += Math.sin(m.angle) * m.speed * dt;
+
+  // update lock info
+  if(m.lockedSourceId === chosen.id && m.lockedType === chosen.type) {
+    m.lockTimer += dt;
+  } else {
+    // newly locked, small acquisition delay can be simulated
+    m.lockedSourceId = chosen.id;
+    m.lockedType = chosen.type;
+    m.lockTimer = 0.05; // pretend quick acquisition
+  }
+
+  // impact detection
+  if(chosen.type === 'target'){
+    const dx = m.x - targetObj.x, dy = m.y - targetObj.y;
+    if(Math.hypot(dx,dy) < 12){
+      // target hit
+      explosions.push({ x: targetObj.x, y: targetObj.y, t:0, ttl: 0.9 });
+      // remove target
+      const idx = targets.findIndex(t => t.id === targetObj.id);
+      if(idx>=0) targets.splice(idx,1);
+      m.status = 'exploded';
+      // missile remains briefly then removed
+    }
+  } else {
+    // flare hit (destroy flare but missile continues)
+    for(let i=flares.length-1;i>=0;i--){
+      if(flares[i].id === chosen.id){
+        const dx = m.x - flares[i].x, dy = m.y - flares[i].y;
+        if(Math.hypot(dx,dy) < 8){
+          explosions.push({ x: flares[i].x, y: flares[i].y, t:0, ttl:0.6 });
+          flares.splice(i,1);
+          // missile may keep going - optionally we could force a reacquire delay
+        }
+        break;
+      }
+    }
+  }
+}
+
+// update functions
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.05, (now - last)/1000);
+  last = now;
+
+  // auto-flare near first target
+  if(autoFlare && targets.length){
+    const iv = parseFloat(ui.autoFlareInterval.value);
+    const nowS = now/1000;
+    if(nowS - lastAutoFlare > iv){
+      // spawn near first target with small offset
+      const t = targets[0];
+      spawnFlareAt(t.x + (Math.random()-0.5)*40, t.y + (Math.random()-0.5)*40, Math.max(1, Math.round(parseFloat(ui.barrageCount.value)/3)));
+      lastAutoFlare = nowS;
+    }
+  }
+
+  // update targets
+  for(let i=targets.length-1;i>=0;i--){
+    const t = targets[i];
+    if(t.pattern === 'jag'){
+      const tt = now/1000;
+      t.x += (t.vx + Math.cos(tt*2 + t.x*0.01)*20) * dt;
+      t.y += (t.vy + Math.sin(tt*1.5 + t.y*0.008)*14) * dt;
+    } else {
+      t.x += t.vx * dt; t.y += t.vy * dt;
+    }
+    // remove if far away
+    if(t.x < -200 || t.x > W+200 || t.y < -200 || t.y > H+200) targets.splice(i,1);
+  }
+
+  // update flares
+  const nowS = now/1000;
+  for(let i=flares.length-1;i>=0;i--){
+    const f = flares[i];
+    f.x += f.vx * dt; f.y += f.vy * dt;
+    // slow drift
+    f.vx *= 0.995; f.vy *= 0.995;
+    // degrade intensity slightly
+    f.intensity *= 0.9995;
+    if(nowS - f.spawnT > f.life) flares.splice(i,1);
+  }
+
+  // update missiles
+  for(let i=missiles.length-1;i>=0;i--){
+    const m = missiles[i];
+    if(m.status === 'active'){
+      updateMissile(m, dt);
+      // lifespan/out-of-bounds
+      if(m.x < -200 || m.x > W+200 || m.y < -200 || m.y > H+200) missiles.splice(i,1);
+    } else {
+      // exploded, remove after small delay
+      // keep for visuals, but remove quickly
+      missiles.splice(i,1);
+    }
+  }
+
+  // update explosions
+  for(let i=explosions.length-1;i>=0;i--){
+    const e = explosions[i];
+    e.t += dt;
+    if(e.t > e.ttl) explosions.splice(i,1);
+  }
+
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// drawing functions
+function draw(){
+  ctx.clearRect(0,0,W,H);
+
+  // grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 1;
+  for(let gx=0; gx<W; gx+=80){ ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke(); }
+  for(let gy=0; gy<H; gy+=80){ ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke(); }
+
+  // flares (draw glow then core)
+  for(const f of flares){
+    radialGlow(f.x, f.y, 56, {r:255,g:150,b:40}, 0.16 * Math.min(1, f.intensity/3));
+    ctx.beginPath(); ctx.fillStyle = 'rgba(255,200,120,0.98)'; ctx.arc(f.x,f.y,6,0,Math.PI*2); ctx.fill();
+  }
+
+  // targets
+  for(const t of targets){
+    radialGlow(t.x, t.y, 44 * t.heat, {r:255,g:90,b:30}, 0.14);
+    ctx.save();
+    ctx.translate(t.x,t.y);
+    const angle = Math.atan2(t.vy, t.vx);
+    ctx.rotate(angle);
+    ctx.fillStyle = '#ffd166';
+    ctx.beginPath(); ctx.moveTo(14,0); ctx.lineTo(-8,6); ctx.lineTo(-6,0); ctx.lineTo(-8,-6); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // missiles + lock indicators (draw locks after computing all missiles)
+  for(const m of missiles){
+    // missile body
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.rotate(m.angle);
+    // seeker cone
+    ctx.fillStyle = 'rgba(255,80,80,0.06)';
+    ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(220,50); ctx.lineTo(220,-50); ctx.closePath(); ctx.fill();
+    // body
+    ctx.fillStyle = '#ff6b6b'; ctx.beginPath(); ctx.ellipse(0,0,8,5,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#ff3b3b'; ctx.beginPath(); ctx.moveTo(10,0); ctx.lineTo(18,6); ctx.lineTo(18,-6); ctx.closePath(); ctx.fill();
+    ctx.restore();
+
+    // draw lock indicator if locked source exists (find it)
+    if(m.lockedSourceId){
+      let src = null;
+      if(m.lockedType === 'target') src = targets.find(t => t.id === m.lockedSourceId);
+      else src = flares.find(f => f.id === m.lockedSourceId);
+      if(src){
+        // ring around source
+        ctx.beginPath(); ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(255,230,120,0.95)';
+        ctx.arc(src.x, src.y, 18, 0, Math.PI*2); ctx.stroke();
+        // line from missile to source
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(255,230,120,0.7)';
+        ctx.lineWidth = 1.5;
+        ctx.moveTo(m.x, m.y); ctx.lineTo(src.x, src.y); ctx.stroke();
+      }
+    }
+  }
+
+  // explosions
+  for(const e of explosions){
+    const t = e.t / e.ttl;
+    const r = 8 + (t*40);
+    ctx.beginPath(); ctx.fillStyle = `rgba(255,120,80,${1-t})`; ctx.arc(e.x, e.y, r, 0, Math.PI*2); ctx.fill();
+  }
+
+  // HUD text
+  ctx.fillStyle = '#dff6ea'; ctx.font = '13px system-ui';
+  ctx.fillText(`Missiles: ${missiles.length}  Targets: ${targets.length}  Flares: ${flares.length}`, 12, 20);
+}
+
+// radial glow helper
+function radialGlow(x,y,r,color,alpha){
+  const g = ctx.createRadialGradient(x,y,0,x,y,r);
+  g.addColorStop(0, `rgba(${color.r},${color.g},${color.b},${alpha})`);
+  g.addColorStop(1, `rgba(${color.r},${color.g},${color.b},0)`);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+}
+
+// update status panel
+function updateStatus(){
+  statusEl.textContent = `Missiles: ${missiles.length} • Targets: ${targets.length} • Flares: ${flares.length}`;
+}
+
+// initial seed
+spawnTarget();
+spawnMissile();
+
+// UI interactions already bound; add extra behaviors
+ui.toggleAutoFlare.addEventListener('click', ()=> {
+  autoFlare = !autoFlare;
+  ui.toggleAutoFlare.textContent = 'Auto-Flare: ' + (autoFlare ? 'ON' : 'OFF');
+});
+
+// also allow drag to spawn a line of flares (press and drag)
+let dragging = false;
+let dragStart = null;
+canvas.addEventListener('mousedown', (e) => { dragging = true; const r=canvas.getBoundingClientRect(); dragStart={x:(e.clientX-r.left)*(canvas.width/r.width), y:(e.clientY-r.top)*(canvas.height/r.height)}; });
+canvas.addEventListener('mouseup', (e) => {
+  if(!dragging) return;
+  dragging=false;
+  const r=canvas.getBoundingClientRect();
+  const mx=(e.clientX-r.left)*(canvas.width/r.width), my=(e.clientY-r.top)*(canvas.height/r.height);
+  // spawn flares along the drag line
+  const steps = Math.min(12, Math.ceil(Math.hypot(mx-dragStart.x, my-dragStart.y)/30));
+  for(let i=0;i<steps;i++){
+    const t = i/(steps-1||1);
+    const px = dragStart.x*(1-t) + mx*t, py = dragStart.y*(1-t) + my*t;
+    spawnFlareAt(px,py,1);
+  }
+  updateStatus();
+});
+
+// keyboard shortcuts for quick demo
+window.addEventListener('keydown',(e)=>{
+  if(e.key === 't') { spawnTarget(); updateStatus(); }
+  if(e.key === 'm') { spawnMissile(); updateStatus(); }
+  if(e.key === '3') { spawnMultiMissiles(3); updateStatus(); }
+  if(e.key === 'r') { resetAll(); updateStatus(); }
+});
+
+// update status periodically
+setInterval(updateStatus, 300);
+
+// start loop
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
+
